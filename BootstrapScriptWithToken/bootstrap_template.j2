@@ -13,24 +13,31 @@ import signal
 import socket
 import subprocess
 import sys
-from SysdbHelperUtils import SysdbPathHelper
-import Cell
-import urlparse
+import time
 
+##############  USER INPUT  ##############
+# Note: If you are saving the file on windows, please make sure to use linux (LF) as newline.
+# By default, windows uses (CR LF), you need to convert the newline char to linux (LF).
 
-############## USER INPUT #############
-cvAddr = ""
+# Address for CVaaS: "www.arista.io"
+# Note: The URL "www.arista.io" can be used for all clusters and the script will redirect
+# to the correct cluster URL. Otherwise if preferred, the correct regional URL where the
+# CVaaS tenant is deployed can be used. The following are the cluster URLs used in production:
+# United States 1a: "www.arista.io"
+# United States 1b: "www.cv-prod-us-central1-b.arista.io"
+# United States 1c: "www.cv-prod-us-central1-c.arista.io"
+# Canada: "www.cv-prod-na-northeast1-b.arista.io"
+# Europe West 2: "www.cv-prod-euwest-2.arista.io"
+# Japan: "www.cv-prod-apnortheast-1.arista.io"
+# Australia: "www.cv-prod-ausoutheast-1.arista.io"
+# United Kingdon: "www.cv-prod-uk-1.arista.io"
+cvAddr = {{ cvAddr }}
 
 # enrollment token to be copied from CVaaS Device Registration page
-enrollmentToken = ""
-# currentTimeDate format hh:mm:ss mm/dd/yyy or hh:mm:ss yyyy-mm-dd or ntp or NTP. Enclosed in double quotes
-currentTimeDate = ""
-# timezone PST8PDT MST7MDT CST6CDT EST5EDT are valid US Timezones. Default PST8PDT
-# Rest of the world check switch CLI. Config>clock timezone ?
-set_timezone = "PST8PDT"
+enrollmentToken = {{ enrollmentToken }}
 
 # Add proxy url if device is behind proxy server, leave it as an empty string otherwise
-cvproxy = ""
+cvproxy = {{ cvproxy }}
 
 # eosUrl is an optional parameter, which needs to be added if
 # - The EOS version is <4.24.1F
@@ -39,7 +46,7 @@ cvproxy = ""
 #      i.e. TA versions < 1.9.0
 # - `cvproxy` parameter value is provided and TA version is <1.19
 # This needs to be a http URL pointing to a SWI image on the local network.
-eosUrl = ""
+eosUrl = {{ eosUrl }}
 
 '''
 Specify the address of the ntp server that the bootstrap script must configure on the device,
@@ -47,7 +54,7 @@ which is to sync the clock before it reaches out to CV.
 For example:
 ntpServer = "ntp1.aristanetworks.com"
 '''
-ntpServer = ""
+ntpServer = {{ ntpServer }}
 
 ##############  CONSTANTS  ##############
 SECURE_HTTPS_PORT = "443"
@@ -203,24 +210,6 @@ def getKeyValueFromFile(filename, key):
             if key in line :
                return line.split("=")[1].rstrip("\n")
    return None
-#
-# Set the current time and date from the user input fields
-def setCurrentTimeDate(currentTimeDate, set_timezone):
-   set_cli_privilege = EapiClient(disableAaa=True, privLevel=15)
-   clock_cmds = ['configure', 'clock timezone {}'.format(set_timezone), 'exit', 'clock set {}'.format(currentTimeDate)]
-   set_clock = set_cli_privilege.runCmds(1, clock_cmds)
-   assert(set_clock['result'] !=0), sys.exit('Switch clock was not set. Exiting')
-
-# Set NTP clock synchronization
-def setNTPsync():
-   ntps = ['time.google.com', 'pool.ntp.org', '45.15.168.198', '216.239.35.4']
-   i=0
-   set_cli_privilege = EapiClient(disableAaa=True, privLevel=15)
-   for i in range(len(ntps)):
-      ntp_cmds = ['configure', 'ntp server {}'.format(ntps[i]), 'exit']
-      config_ntp_server = set_cli_privilege.runCmds(1, ntp_cmds)
-      assert(config_ntp_server['result'] !=0), sys.exit('NTP server was not configured successfully. Exiting')
-
 
 
 def tryImageUpgrade(e):
@@ -328,10 +317,10 @@ class BootstrapManager(object):
          return
 
       try:
-
+{% raw %}
          payload = '{{"key": {{"system_id": "{serialNum}"}}}}'.format(
             serialNum=self.mibStatus.root.serialNum)
-
+{% endraw %}
          headers = {"redirector_token": enrollmentToken}
          response = requests.post(self.redirectorURL.geturl(), data=payload,
                                     headers=headers, proxies=proxies)
@@ -352,12 +341,12 @@ class BootstrapManager(object):
       log("Step 0 done, redirected to the correct cluster URL")
       log("enrollAddr - {enrollAddr}".format(enrollAddr=self.enrollAddr))
 
-##################################################################################
-# step 1: get client certificate using the enrollment token
-##################################################################################
-   def getClientCerficates( self ):
-      with open( TOKEN_FILE_PATH, "w" ) as f:
-         f.write( enrollmentToken )
+   ##################################################################################
+   # Step 1: Get client certificate using the enrollment token
+   ##################################################################################
+   def getClientCertificates( self ):
+      with open(TOKEN_FILE_PATH, "w") as f:
+         f.write(enrollmentToken)
 
       # A timeout of 60 seconds is used with TerminAttr commands since in most
       # versions of TerminAttr, the command execution does not finish if a wrong
@@ -412,25 +401,15 @@ class BootstrapManager(object):
          self.certificate = "{basePath}/certs/client.crt".format(basePath=basePath)
          self.key = "{basePath}/keys/client.key".format(basePath=basePath)
 
-      print( "step 2 done, obtained client certificates location from TA" )
-      print( "ceriticate location: " + self.certificate )
-      print( "key location: " + self.key )
+      log("Step 2 done, obtained client certs location")
+      log("certificate location - {certificate}".format(certificate=self.certificate))
+      log("key location - {key}".format(key=self.key))
 
    ##################################################################################
    # Step 3.1: Get bootstrap script using the certificates
    ##################################################################################
    def getBootstrapScript( self ):
-      # setting Sysdb access variables
-      sysname = os.environ.get( "SYSNAME", "ar" )
-      pathHelper = SysdbPathHelper( sysname )
-
-      # sysdb paths accessed
-      cellID = str( Cell.cellId() )
-      mibStatus = pathHelper.getEntity( "hardware/entmib" )
-      tpmStatus = pathHelper.getEntity( "cell/" + cellID + "/hardware/tpm/status" )
-      tpmConfig = pathHelper.getEntity( "cell/" + cellID + "/hardware/tpm/config" )
-
-      # setting header information
+      # Setting header information
       headers = {}
       headers["X-Arista-SystemMAC"] = self.mibStatus.systemMacAddr
       headers["X-Arista-ModelName"] = self.mibStatus.root.modelName
@@ -496,8 +475,9 @@ class BootstrapManager(object):
          raise e
       log("Step 3.2.2 done, executed the fetched bootstrap script")
 
-   def run( self ):
-      self.getClientCerficates()
+   def run(self):
+      self.checkWithRedirector()
+      self.getClientCertificates()
       self.getCertificatePaths()
       self.getBootstrapScript()
       self.executeBootstrap()
@@ -540,7 +520,21 @@ if __name__ == "__main__":
       log(err)
       sys.exit(err)
    if enrollmentToken == "":
-      sys.exit( "error: enrollment token missing" )
+      err = "Error: enrollment token missing"
+      log(err)
+      sys.exit(err)
+
+   # Restart ntp process in case a ntpServer value is passed.
+   if ntpServer != "":
+      configureAndRestartNTP(ntpServer)
+
+   # Check for enrollment token expiry
+   expiryEpoch, parseSuccess = getExpiryFromToken(enrollmentToken)
+   if parseSuccess and time.time() > expiryEpoch:
+      expiry = datetime.datetime.fromtimestamp(expiryEpoch)
+      err = "Error: enrollment token expired. expired on: {expiry} GMT".format(expiry=str(expiry))
+      log(err)
+      sys.exit(err)
 
    # Check whether it is cloud or on prem
    if cvAddr.find("arista.io") != -1:
